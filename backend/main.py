@@ -1,5 +1,10 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import json
+import uuid
+import datetime
+import os
+from pathlib import Path
 
 app = FastAPI()
 
@@ -16,6 +21,32 @@ app.add_middleware(
 @app.get('/')
 def read_root():
     return {'Ping': 'Pong'}
+
+
+# path for storing saved pipelines (one JSON object per line)
+BASE_DIR = Path(__file__).parent
+SAVED_PIPELINES_FILE = BASE_DIR / 'saved_pipelines.jsonl'
+
+
+def save_pipeline_record(payload: dict) -> str:
+    """Append a record to the JSONL file and return the generated id."""
+    try:
+        record_id = str(uuid.uuid4())
+        record = {
+            'id': record_id,
+            'timestamp_utc': datetime.datetime.utcnow().isoformat() + 'Z',
+            'payload': payload,
+        }
+        # ensure directory exists
+        SAVED_PIPELINES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(SAVED_PIPELINES_FILE, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+        print(f"Saved pipeline {record_id} to {SAVED_PIPELINES_FILE}")
+        return record_id
+    except Exception as e:
+        # Log error but don't raise — higher-level code will still return a response
+        print('Failed to save pipeline record:', e)
+        return ''
 
 
 def is_dag_from_edges(nodes, edges):
@@ -91,6 +122,8 @@ async def parse_pipeline(req: Request):
     nodes = payload.get('nodes', [])
     edges = payload.get('edges', [])
 
+    print(f"Received /pipelines/parse request: nodes={len(nodes)} edges={len(edges)}")
+
     num_nodes = len(nodes)
     num_edges = len(edges)
     dag = is_dag_from_edges(nodes, edges)
@@ -104,6 +137,8 @@ async def execute_pipeline(req: Request):
     nodes = payload.get('nodes', [])
     edges = payload.get('edges', [])
 
+    print(f"Received /pipelines/execute request: nodes={len(nodes)} edges={len(edges)}")
+
     if not nodes:
         raise HTTPException(status_code=400, detail='No nodes to execute')
 
@@ -113,6 +148,9 @@ async def execute_pipeline(req: Request):
     order = topological_order(nodes, edges)
     if not order:
         raise HTTPException(status_code=400, detail='Unable to derive execution order')
+
+    # persist the pipeline payload and return an id to the client
+    pipeline_id = save_pipeline_record(payload)
 
     node_lookup = {n.get('id'): n for n in nodes if isinstance(n, dict)}
     steps = []
@@ -126,4 +164,5 @@ async def execute_pipeline(req: Request):
         'num_nodes': len(nodes),
         'num_edges': len(edges),
         'execution_order': steps,
+        'pipeline_id': pipeline_id,
     }
